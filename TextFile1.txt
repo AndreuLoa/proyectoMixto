@@ -1,0 +1,160 @@
+using System.IO;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Azure.WebJobs;
+using Microsoft.Azure.WebJobs.Extensions.Http;
+using Microsoft.AspNetCore.Http;
+using Newtonsoft.Json;
+using System;
+using System.Collections.Generic;
+using Microsoft.Azure.CognitiveServices.Vision.Face;
+using Microsoft.Azure.CognitiveServices.Vision.Face.Models;
+using Microsoft.Extensions.Logging;
+using Newtonsoft.Json.Linq;
+
+namespace proyectoMixto
+{
+    public static class Main
+    {
+        public class Face
+        {
+            [JsonProperty("id")]
+            public string Id { get; set; }
+            [JsonProperty("name")]
+            public string Name { get; set; }
+            [JsonProperty("faceid")]
+            public string FaceId { get; set; }
+            [JsonProperty("rectangle")]
+            public string Rectangle { get; set; }
+            [JsonProperty("attributes")]
+            public string Attributes { get; set; }
+            [JsonProperty("landmarks")]
+            public string Landmarks { get; set; }
+
+            public Face(DetectedFace detected)
+            {
+                this.Id = null;
+                this.FaceId = detected?.FaceId.Value.ToString();
+            }
+        }
+        public static Stream transFrom(string base64)
+        {
+            byte[] bytes = Convert.FromBase64String(base64);
+            MemoryStream memoryStream = new MemoryStream(bytes);
+            return memoryStream;
+        }
+
+        [FunctionName("postDB")]
+        public static async Task<IActionResult> RunPostDB(
+            [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "postdb/")] HttpRequest req,
+            [CosmosDB(
+                databaseName: "faceDB",
+                collectionName: "faceContainer",
+                ConnectionStringSetting = "dbCosmos"
+            )] IAsyncCollector<Face> datos)
+        {
+           //Post Image
+            IActionResult exit = new NotFoundObjectResult(null);
+            var requestBody = await new StreamReader(req.Body).ReadToEndAsync();
+            dynamic data = JsonConvert.DeserializeObject(requestBody);
+            string base64 = data.img;
+            if (base64 != null && data.name != null)
+            {
+                //Autentificacion Face Client
+                dynamic key = Environment.GetEnvironmentVariable("Key");
+                dynamic endpoint = Environment.GetEnvironmentVariable("Endpoint");
+                IFaceClient client = new FaceClient(new ApiKeyServiceClientCredentials(key)) { Endpoint = endpoint };
+
+                IList<DetectedFace> detectedFaces;
+                detectedFaces = await client.Face.DetectWithStreamAsync(transFrom(base64),
+                    returnFaceAttributes: new List<FaceAttributeType> {
+                        FaceAttributeType.Accessories,
+                        FaceAttributeType.Age,
+                        FaceAttributeType.Blur,
+                        FaceAttributeType.Emotion,
+                        FaceAttributeType.Exposure,
+                        FaceAttributeType.FacialHair,
+                        FaceAttributeType.Glasses,
+                        FaceAttributeType.Hair,
+                        FaceAttributeType.HeadPose,
+                        FaceAttributeType.Makeup,
+                        FaceAttributeType.Noise,
+                        FaceAttributeType.Occlusion,
+                        FaceAttributeType.Smile,
+                        FaceAttributeType.QualityForRecognition},
+                    detectionModel: DetectionModel.Detection01,
+                    recognitionModel: RecognitionModel.Recognition04,
+                    returnRecognitionModel: true);
+                Face face1 = new(detectedFaces[0]);
+                face1.Name = data.name;
+                await datos.AddAsync(face1);
+                exit = new OkObjectResult(face1);
+            }
+            return exit;
+        }
+
+        [FunctionName("postCompare")]
+        public static async Task<IActionResult> RunGetDB(
+            [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "compare/")] HttpRequest req,
+            [CosmosDB(
+                databaseName: "faceDB",
+                collectionName: "faceContainer",
+                ConnectionStringSetting = "dbCosmos"
+            )] IEnumerable<Face> datos, ILogger log)
+        {
+            //autenticate
+            dynamic key = Environment.GetEnvironmentVariable("Key");
+            dynamic endpoint = Environment.GetEnvironmentVariable("Endpoint");
+            IFaceClient client = new FaceClient(new ApiKeyServiceClientCredentials(key)) { Endpoint = endpoint };
+
+            //Reading Image
+            IActionResult exit = new NotFoundObjectResult(null);
+            var requestBody = await new StreamReader(req.Body).ReadToEndAsync();
+            dynamic data = JsonConvert.DeserializeObject(requestBody);
+            string base64 = data?.img;
+
+            IList<DetectedFace> detectedFaces;
+            detectedFaces = await client.Face.DetectWithStreamAsync(transFrom(base64),
+                    returnFaceAttributes: new List<FaceAttributeType> {
+                        FaceAttributeType.Accessories,
+                        FaceAttributeType.Age,
+                        FaceAttributeType.Blur,
+                        FaceAttributeType.Emotion,
+                        FaceAttributeType.Exposure,
+                        FaceAttributeType.FacialHair,
+                        FaceAttributeType.Glasses,
+                        FaceAttributeType.Hair,
+                        FaceAttributeType.HeadPose,
+                        FaceAttributeType.Makeup,
+                        FaceAttributeType.Noise,
+                        FaceAttributeType.Occlusion,
+                        FaceAttributeType.Smile,
+                        FaceAttributeType.QualityForRecognition},
+                    recognitionModel: RecognitionModel.Recognition04,
+                    returnRecognitionModel: true);
+
+            IList<Guid?> targetFaceIds = new List<Guid?>();
+            foreach (Face face in datos)
+            {
+                targetFaceIds.Add(Guid.Parse(face.FaceId));
+            }
+
+            IList<SimilarFace> similarResults = await client.Face.FindSimilarAsync(detectedFaces[0].FaceId.Value, null, null, targetFaceIds);
+            String facename = string.Empty;
+            foreach (SimilarFace sim in similarResults)
+            {
+                foreach (Face face in datos)
+                {
+                    if (face.FaceId == sim.FaceId.ToString())
+                    {
+                        facename = face.Name;
+                    }
+                }
+            }
+
+            
+            //Reading Post Image
+            return new OkObjectResult(facename);
+        }
+    }
+}
